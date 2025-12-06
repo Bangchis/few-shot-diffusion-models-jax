@@ -212,7 +212,8 @@ def encode_set(
         hc = hc_flat.reshape(b, ns, -1).mean(axis=1)
     else:
         # encoder returns (hc, patches, cls) for forward_set
-        hc, _, _ = encoder.apply(params_enc, x_set, train=train)
+        # Must explicitly call forward_set method (apply() defaults to __call__)
+        hc, _, _ = encoder.apply(params_enc, x_set, train=train, method=encoder.forward_set)
         if hc.ndim == 3:
             hc = hc.mean(axis=1)
     return hc
