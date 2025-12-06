@@ -143,3 +143,118 @@ def sample(
             clip_denoised=clip_denoised,
         )
 
+
+# ----------------------- Pmap multi-device utilities ----------------------- #
+
+
+@dataclass
+class TrainStatePmap:
+    """
+    Pmap-friendly train state holding params, EMA params, opt state, and step.
+    """
+
+    params: Any
+    ema_params: Any
+    opt_state: optax.OptState
+    step: jnp.ndarray
+
+
+def create_train_state_pmap(
+    params: Any,
+    learning_rate: float = 1e-4,
+    weight_decay: float = 0.0,
+):
+    tx = optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+    opt_state = tx.init(params)
+    return TrainStatePmap(
+        params=params,
+        ema_params=params,
+        opt_state=opt_state,
+        step=jnp.array(0, dtype=jnp.int32),
+    ), tx
+
+
+def _tree_update_ema(ema_params, params, rate: float):
+    return jax.tree_map(lambda e, p: update_ema(e, p, rate=rate), ema_params, params)
+
+
+def shard_batch(batch: Array, n_devices: int) -> Array:
+    """
+    Reshape leading batch dim to (n_devices, per_device, ...).
+    """
+    b = batch.shape[0]
+    assert b % n_devices == 0, "Batch size must be divisible by number of devices"
+    per_dev = b // n_devices
+    new_shape = (n_devices, per_dev) + batch.shape[1:]
+    return batch.reshape(new_shape)
+
+
+def train_step_pmap(
+    tx: optax.GradientTransformation,
+    loss_fn: Callable[[Any, Array, PRNGKey], Dict[str, Array]],
+    ema_rate: float = 0.999,
+):
+    """
+    Returns a pmapped train step: state, batch, rng -> (state, metrics).
+    loss_fn(params, batch, rng) should return dict with key 'loss'.
+    """
+
+    def step(state: TrainStatePmap, batch, rng):
+        def loss_wrap(p):
+            losses = loss_fn(p, batch, rng)
+            return losses["loss"], losses
+
+        (loss, losses), grads = jax.value_and_grad(loss_wrap, has_aux=True)(state.params)
+        updates, new_opt_state = tx.update(grads, state.opt_state, state.params)
+        new_params = optax.apply_updates(state.params, updates)
+        new_ema_params = _tree_update_ema(state.ema_params, new_params, rate=ema_rate)
+
+        new_state = TrainStatePmap(
+            params=new_params,
+            ema_params=new_ema_params,
+            opt_state=new_opt_state,
+            step=state.step + 1,
+        )
+
+        # mean metrics over devices for logging outside
+        metrics = {"loss": loss}
+        if isinstance(losses, dict):
+            for k, v in losses.items():
+                metrics[k] = v
+        return new_state, metrics
+
+    return jax.pmap(step, axis_name="devices")
+
+
+def sample_ema(
+    rng: PRNGKey,
+    ema_params: Any,
+    diffusion,
+    model_apply: Callable,
+    shape: Tuple[int, ...],
+    conditioning: Optional[Any] = None,
+    use_ddim: bool = False,
+    eta: float = 0.0,
+    clip_denoised: bool = True,
+):
+    """
+    Sampling helper that uses provided EMA params and model_apply.
+    """
+    apply = lambda x, t, c=None, **kw: model_apply(ema_params, x, t, c, train=False, **kw)
+    if use_ddim:
+        return diffusion.ddim_sample_loop(
+            rng,
+            apply,
+            shape,
+            c=conditioning,
+            clip_denoised=clip_denoised,
+            eta=eta,
+        )
+    return diffusion.p_sample_loop(
+        rng,
+        apply,
+        shape,
+        c=conditioning,
+        clip_denoised=clip_denoised,
+    )
+
