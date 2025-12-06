@@ -21,10 +21,11 @@ from model.set_diffusion.script_util_jax import (
     create_model_and_diffusion,
 )
 from model.set_diffusion.dit_jax import DiT
-from model.set_diffusion.gaussian_diffusion_jax import GaussianDiffusion
+from set_diffusion.gaussian_diffusion_jax import GaussianDiffusion
 from model.set_diffusion.nn_jax import mean_flat
-from model.vit_jax import ViT
-from model.vit_set_jax import sViT
+from vit_set_jax import sViT
+from vit_jax import ViT
+
 
 Array = jnp.ndarray
 PRNGKey = jax.Array
