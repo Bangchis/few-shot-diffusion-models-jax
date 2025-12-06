@@ -177,7 +177,7 @@ def update_ema(target_params, source_params, rate: float = 0.99):
     :param rate: EMA rate (gần 1 thì update chậm).
     :return: pytree params EMA mới.
     """
-    return jax.tree_map(
+    return jax.tree.map(
         lambda targ, src: rate * targ + (1.0 - rate) * src,
         target_params,
         source_params,
@@ -191,7 +191,7 @@ def zero_module(params):
     Ở PyTorch, zero_module(module) chỉnh in-place module.parameters().
     Ở JAX/Flax, ta thao tác trực tiếp trên dict params.
     """
-    return jax.tree_map(lambda p: jnp.zeros_like(p), params)
+    return jax.tree.map(lambda p: jnp.zeros_like(p), params)
 
 
 def scale_module(params, scale: float):
@@ -200,7 +200,7 @@ def scale_module(params, scale: float):
 
     PyTorch version sửa in-place, ở đây trả về param mới.
     """
-    return jax.tree_map(lambda p: p * scale, params)
+    return jax.tree.map(lambda p: p * scale, params)
 
 
 # ---------------------------------------------------------------------------

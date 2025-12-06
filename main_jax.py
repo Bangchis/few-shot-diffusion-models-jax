@@ -207,7 +207,7 @@ def main():
             p_state, metrics = p_train_step(p_state, batch_sharded, step_rngs)
 
             # host metrics
-            metrics_host = jax.tree_map(lambda x: np.array(x).mean(), metrics)
+            metrics_host = jax.tree.map(lambda x: np.array(x).mean(), metrics)
             global_step += 1
 
             if global_step % args.log_interval == 0:
