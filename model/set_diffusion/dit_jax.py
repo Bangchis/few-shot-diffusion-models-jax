@@ -314,10 +314,12 @@ class DiT(nn.Module):
             t_emb = t_emb + y_emb
 
         if self.mode_conditioning == "film":
+            # Create Dense layer unconditionally (required for Flax @nn.compact)
+            context_proj_layer = nn.Dense(
+                self.hidden_size, kernel_init=nn.initializers.xavier_uniform()
+            )
             if c is not None:
-                context_proj = nn.Dense(
-                    self.hidden_size, kernel_init=nn.initializers.xavier_uniform()
-                )(c)
+                context_proj = context_proj_layer(c)
                 conditioning = t_emb + context_proj
             else:
                 conditioning = t_emb
@@ -717,10 +719,12 @@ class DiT(nn.Module):
         # THÊM: Xử lý few-shot conditioning
         if self.mode_conditioning == "film":
             # Film mode: combine time embedding với context embedding
+            # Create Dense layer unconditionally (required for Flax @nn.compact)
+            context_proj_layer = nn.Dense(self.hidden_size, kernel_init=nn.initializers.xavier_uniform())
             if c is not None:
                 # c: (B, context_channels)
                 # Project context to hidden_size và combine với time embedding
-                context_proj = nn.Dense(self.hidden_size, kernel_init=nn.initializers.xavier_uniform())(c)
+                context_proj = context_proj_layer(c)
                 conditioning = t_emb + context_proj  # (B, hidden_size)
             else:
                 conditioning = t_emb
