@@ -5,20 +5,24 @@ This script mirrors the structure of main.py but targets vfsddpm_jax.
 """
 
 import argparse
-import time
-
 import jax
 import numpy as np
+import flax
+import flax.serialization as serialization
+import orbax.checkpoint as ocp
+import os
+import wandb
 
 from dataset import create_loader
-from model import select_model  # keeps existing namespace for non-JAX
+from model import select_model  # keeps existing namespace for non-JAX 
 from model.select_model_jax import select_model_jax
-from model.vfsddpm_jax import vfsddpm_loss
+from model.vfsddpm_jax import vfsddpm_loss, leave_one_out_c
 from model.set_diffusion import logger
 from model.set_diffusion.train_util_jax import (
     create_train_state_pmap,
     shard_batch,
     train_step_pmap,
+    sample_ema,
 )
 from model.set_diffusion.script_util_jax import (
     add_dict_to_argparser as add_dict_to_argparser_jax,
@@ -40,9 +44,77 @@ def numpy_from_torch(batch):
     return arr
 
 
+def eval_loop(p_state, modules, cfg, loader, n_devices, num_batches):
+    """
+    Simple eval: run vfsddpm_loss (train=False) on a few batches (host-side).
+    Uses EMA params for evaluation.
+    """
+    if num_batches <= 0:
+        return 0.0
+    host_state = jax.device_get(p_state)
+    params_eval = host_state.ema_params
+    losses = []
+    it = iter(loader)
+    for _ in range(num_batches):
+        try:
+            batch = next(it)
+        except StopIteration:
+            break
+        batch_np = numpy_from_torch(batch)
+        # use full batch on host (single device) for eval
+        loss_dict = vfsddpm_loss(jax.random.PRNGKey(0), params_eval, modules, batch_np, cfg, train=False)
+        losses.append(np.array(loss_dict["loss"]))
+    if not losses:
+        return 0.0
+    return float(np.mean(losses))
+
+
+def sample_loop(p_state, modules, cfg, loader, num_batches, rng, use_ddim, eta):
+    """
+    Minimal sampling: use first batches from loader, build conditioning, and run diffusion.
+    Saves .npz files with samples/cond.
+    """
+    if num_batches <= 0:
+        return
+    host_state = jax.device_get(p_state)
+    ema_params = host_state.ema_params
+    diffusion = modules["diffusion"]
+    dit = modules["dit"]
+    encoder = modules["encoder"]
+    posterior = modules.get("posterior")
+
+    it = iter(loader)
+    for i in range(num_batches):
+        try:
+            batch = next(it)
+        except StopIteration:
+            break
+        batch_np = numpy_from_torch(batch)
+        b, ns, c, h, w = batch_np.shape
+        rng, sub = jax.random.split(rng)
+        # build conditioning c (host-side, deterministic)
+        c_cond, _ = leave_one_out_c(sub, {"encoder": ema_params["encoder"], "posterior": ema_params.get("posterior")}, modules, batch_np, cfg, train=False)
+        # sampling shape
+        shape = (b * ns, c, h, w)
+        # model_apply using ema_params["dit"]
+        model_apply = lambda params, x, t, c=None, **kw: dit.apply(params, x, t, c=c, train=False, **kw)
+        samples = sample_ema(sub, ema_params["dit"], diffusion, model_apply, shape, conditioning=c_cond, use_ddim=use_ddim, eta=eta)
+        # save npz
+        out_path = os.path.join(DIR, f"samples_{i:03d}.npz")
+        np.savez(out_path, samples=np.array(samples), cond=batch_np)
+
+
+
 def main():
     args = create_argparser().parse_args()
     set_seed(getattr(args, "seed", 0))
+
+    if args.use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=vars(args),
+        )
 
     print("\nArgs:")
     for k in sorted(vars(args)):
@@ -75,6 +147,46 @@ def main():
 
     # Data loaders (PyTorch) on CPU
     train_loader = create_loader(args, split="train", shuffle=True)
+    val_loader = create_loader(args, split="val", shuffle=False)
+
+    # Checkpointing
+    checkpointer = ocp.Checkpointer(ocp.PyTreeCheckpointHandler())
+    ckpt_dir = os.path.join(DIR, "checkpoints_jax")
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    def save_checkpoint(step_int, rng_save):
+        host_state = jax.device_get(p_state)
+        ckpt = {
+            "params": host_state.params,
+            "ema_params": host_state.ema_params,
+            "opt_state": host_state.opt_state,
+            "step": int(step_int),
+            "rng": rng_save,
+            "cfg": cfg,
+        }
+        checkpointer.save(os.path.join(ckpt_dir, f"ckpt_{step_int:06d}"), ckpt)
+
+    def load_checkpoint(path):
+        nonlocal p_state, rng
+        if not path:
+            return
+        if not os.path.exists(path):
+            logger.log(f"resume_checkpoint not found: {path}")
+            return
+        host_state = checkpointer.restore(path)
+        p_state = jax.device_put_replicated(
+            p_state.replace(
+                params=host_state["params"],
+                ema_params=host_state["ema_params"],
+                opt_state=host_state["opt_state"],
+                step=host_state["step"],
+            ),
+            jax.local_devices(),
+        )
+        rng = host_state.get("rng", rng)
+        logger.log(f"loaded checkpoint {path} at step {host_state['step']}")
+
+    load_checkpoint(args.resume_checkpoint)
 
     logger.log("starting training (jax pmap)...")
     global_step = 0
@@ -103,6 +215,18 @@ def main():
                         v = v.item() if v.size == 1 else v
                     logger.logkv_mean(k, v)
                 logger.dumpkvs()
+                if args.use_wandb:
+                    wandb.log({**metrics_host, "step": global_step})
+
+            # Save / Eval / Sample
+            if args.save_interval and global_step % args.save_interval == 0:
+                save_checkpoint(global_step, rng)
+                eval_loss = eval_loop(p_state, modules, cfg, val_loader, n_devices, args.num_eval_batches)
+                logger.logkv("eval_loss", eval_loss)
+                logger.dumpkvs()
+                if args.use_wandb:
+                    wandb.log({"eval_loss": eval_loss, "step": global_step})
+                sample_loop(p_state, modules, cfg, val_loader, args.num_sample_batches, rng, args.use_ddim, args.eta)
 
             if args.lr_anneal_steps and global_step >= args.lr_anneal_steps:
                 break
@@ -110,6 +234,8 @@ def main():
             break
 
     logger.log("training complete.")
+    if args.use_wandb:
+        wandb.finish()
 
 
 def create_argparser():
@@ -134,12 +260,19 @@ def create_argparser():
         lr_anneal_steps=0,
         batch_size=16,
         log_interval=100,
+        save_interval=10000,
+        num_eval_batches=10,
+        num_sample_batches=2,
         ema_rate="0.9999",
         resume_checkpoint="",
         clip_denoised=True,
         use_ddim=False,
+        eta=0.0,
         tag=None,
         seed=0,
+        use_wandb=False,
+        wandb_project="fsdm-jax",
+        wandb_run_name=None,
     )
     defaults.update(model_and_diffusion_defaults_jax())
     parser = argparse.ArgumentParser()
