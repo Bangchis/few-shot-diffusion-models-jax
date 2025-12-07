@@ -104,7 +104,7 @@ def sample_loop(p_state, modules, cfg, loader, num_batches, rng, use_ddim, eta):
         shape = (b * ns, c, h, w)
         # model_apply using ema_params["dit"]
         model_apply = lambda params, x, t, c=None, **kw: dit.apply(
-            params, x, t, c=c, train=False, **kw)
+            params, x, t, c=c, **kw)
         samples = sample_ema(sub, ema_params["dit"], diffusion, model_apply,
                              shape, conditioning=c_cond, use_ddim=use_ddim, eta=eta)
         # save npz
