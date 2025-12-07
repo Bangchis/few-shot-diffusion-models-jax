@@ -173,24 +173,57 @@ class BaseSetsDataset(data.Dataset):
 
     def make_sets(self, images, labels):
         """
-        Create sets of arbitrary size between 1 and 20. 
+        Create sets of arbitrary size between 1 and 20.
         The sets are composed of one class.
+
+        FIXED: Now properly groups images by class before creating sets,
+        ensuring each set contains samples from ONLY ONE class.
         """
 
         num_classes = np.max(labels) + 1
-        
-        perm = np.random.permutation(len(images))
-        images = images[perm]
-        labels = labels[perm]
-        
-        # init sets
-        image_sets = images.reshape(-1, self.sample_size,
-                                    self.nc, self.size, self.size)
-        label_sets = labels.reshape(-1, self.sample_size)
-        
+
+        # Group images by class
+        all_sets = []
+        all_labels = []
+
+        for class_id in range(num_classes):
+            # Get all images for this class
+            class_mask = (labels == class_id)
+            class_images = images[class_mask]
+            class_labels = labels[class_mask]
+
+            if len(class_images) < self.sample_size:
+                # Skip classes with insufficient samples
+                continue
+
+            # Shuffle images within this class
+            perm = np.random.permutation(len(class_images))
+            class_images = class_images[perm]
+            class_labels = class_labels[perm]
+
+            # Create sets from this class only
+            # Truncate to multiple of sample_size
+            n_sets = len(class_images) // self.sample_size
+            truncated_images = class_images[:n_sets * self.sample_size]
+            truncated_labels = class_labels[:n_sets * self.sample_size]
+
+            # Reshape into sets
+            class_sets = truncated_images.reshape(n_sets, self.sample_size,
+                                                 self.nc, self.size, self.size)
+            class_label_sets = truncated_labels.reshape(n_sets, self.sample_size)
+
+            all_sets.append(class_sets)
+            all_labels.append(class_label_sets)
+
+        # Concatenate all sets from all classes
+        image_sets = np.concatenate(all_sets, axis=0)
+        label_sets = np.concatenate(all_labels, axis=0)
+
+        # Shuffle the sets (not the samples within sets)
         perm = np.random.permutation(len(image_sets))
         x = image_sets[perm]
         y = label_sets[perm]
+
         return x, y
 
     def split_train_val(self, ratio=0.9):
