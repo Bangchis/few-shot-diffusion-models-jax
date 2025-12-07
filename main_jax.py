@@ -16,10 +16,11 @@ import wandb
 from tqdm import tqdm
 
 from dataset import create_loader
-from model import select_model  # keeps existing namespace for non-JAX 
+from model import select_model  # keeps existing namespace for non-JAX
 from model.select_model_jax import select_model_jax
 from model.vfsddpm_jax import vfsddpm_loss, leave_one_out_c
 from model.set_diffusion import logger
+from metrics import fid_jax
 from model.set_diffusion.train_util_jax import (
     create_train_state_pmap,
     shard_batch,
@@ -64,7 +65,8 @@ def eval_loop(p_state, modules, cfg, loader, n_devices, num_batches):
             break
         batch_np = numpy_from_torch(batch)
         # use full batch on host (single device) for eval
-        loss_dict = vfsddpm_loss(jax.random.PRNGKey(0), params_eval, modules, batch_np, cfg, train=False)
+        loss_dict = vfsddpm_loss(jax.random.PRNGKey(
+            0), params_eval, modules, batch_np, cfg, train=False)
         losses.append(np.array(loss_dict["loss"]))
     if not losses:
         return 0.0
@@ -98,12 +100,15 @@ def sample_loop(p_state, modules, cfg, loader, num_batches, rng, use_ddim, eta):
         b, ns, c, h, w = batch_np.shape
         rng, sub = jax.random.split(rng)
         # build conditioning c (host-side, deterministic)
-        c_cond, _ = leave_one_out_c(sub, {"encoder": ema_params["encoder"], "posterior": ema_params.get("posterior")}, modules, batch_np, cfg, train=False)
+        c_cond, _ = leave_one_out_c(sub, {"encoder": ema_params["encoder"], "posterior": ema_params.get(
+            "posterior")}, modules, batch_np, cfg, train=False)
         # sampling shape
         shape = (b * ns, c, h, w)
         # model_apply using ema_params["dit"]
-        model_apply = lambda params, x, t, c=None, **kw: dit.apply(params, x, t, c=c, train=False, **kw)
-        samples = sample_ema(sub, ema_params["dit"], diffusion, model_apply, shape, conditioning=c_cond, use_ddim=use_ddim, eta=eta)
+        model_apply = lambda params, x, t, c=None, **kw: dit.apply(
+            params, x, t, c=c, train=False, **kw)
+        samples = sample_ema(sub, ema_params["dit"], diffusion, model_apply,
+                             shape, conditioning=c_cond, use_ddim=use_ddim, eta=eta)
         # save npz
         out_path = os.path.join(DIR, f"samples_{i:03d}.npz")
         np.savez(out_path, samples=np.array(samples), cond=batch_np)
@@ -113,8 +118,114 @@ def sample_loop(p_state, modules, cfg, loader, num_batches, rng, use_ddim, eta):
         all_support.append(batch_np)
 
     return np.concatenate(all_samples, axis=0) if all_samples else None, \
-           np.concatenate(all_support, axis=0) if all_support else None
+        np.concatenate(all_support, axis=0) if all_support else None
 
+
+def compute_fid_4096(p_state, modules, cfg, val_loader, n_samples, rng, use_ddim, eta, inception_fn):
+    """
+    Compute FID score by generating n_samples images from different support sets.
+
+    Args:
+        p_state: Parallel training state with EMA parameters
+        modules: Dict of model modules
+        cfg: Model configuration
+        val_loader: Validation data loader
+        n_samples: Number of samples to generate for FID (e.g., 4096)
+        rng: JAX random key
+        use_ddim: Whether to use DDIM sampling
+        eta: DDIM eta parameter
+        inception_fn: InceptionV3 apply function for FID
+
+    Returns:
+        fid_score: FID score (lower is better)
+    """
+    print(f"\n=== Computing FID with {n_samples} samples ===")
+
+    from model.vfsddpm_jax import leave_one_out_c
+    from model.set_diffusion.train_util_jax import sample_ema
+
+    all_generated = []
+    all_real = []
+
+    it = iter(val_loader)
+    n_batches = 0
+    total_generated = 0
+
+    while total_generated < n_samples:
+        try:
+            batch = next(it)
+        except StopIteration:
+            # Restart iterator if we run out of data
+            it = iter(val_loader)
+            batch = next(it)
+
+        # batch shape: (bs, ns, C, H, W)
+        batch_np = np.array(batch)
+        bs, ns, C, H, W = batch_np.shape
+
+        # Unreplicate EMA params from pmap
+        ema_params = flax.jax_utils.unreplicate(p_state.ema_params)
+
+        # Get conditioning via leave-one-out
+        sub = {"encoder": ema_params["encoder"],
+               "posterior": ema_params.get("posterior")}
+        c_cond, _ = leave_one_out_c(
+            sub, sub, modules, batch_np, cfg, train=False)
+
+        # Sample
+        diffusion = modules["diffusion"]
+        model_apply = modules["dit"].apply
+        shape = (bs * ns, C, H, W)
+
+        rng, sample_rng = jax.random.split(rng)
+        samples = sample_ema(
+            sub, ema_params["dit"], diffusion, model_apply,
+            shape, conditioning=c_cond, use_ddim=use_ddim, eta=eta, rng=sample_rng
+        )
+
+        # Convert samples from (bs*ns, C, H, W) to (bs*ns, H, W, C) for InceptionV3
+        samples_np = np.array(samples)
+        samples_hwc = samples_np.transpose(0, 2, 3, 1)  # NCHW -> NHWC
+
+        # Also collect real images in NHWC format
+        # (bs, ns, C, H, W) -> (bs*ns, C, H, W)
+        real_np = batch_np.reshape(-1, C, H, W)
+        real_hwc = real_np.transpose(0, 2, 3, 1)  # NCHW -> NHWC
+
+        all_generated.append(samples_hwc)
+        all_real.append(real_hwc)
+
+        total_generated += samples_hwc.shape[0]
+        n_batches += 1
+
+        print(
+            f"  Generated {total_generated}/{n_samples} samples ({n_batches} batches)")
+
+        if total_generated >= n_samples:
+            break
+
+    # Concatenate all samples
+    generated_images = np.concatenate(all_generated, axis=0)[:n_samples]
+    real_images = np.concatenate(all_real, axis=0)[:n_samples]
+
+    print(f"Generated images shape: {generated_images.shape}")
+    print(f"Real images shape: {real_images.shape}")
+    print(
+        f"Image value range: [{generated_images.min():.2f}, {generated_images.max():.2f}]")
+
+    # Compute FID
+    try:
+        fid_score = fid_jax.compute_fid(
+            real_images,
+            generated_images,
+            inception_fn=inception_fn,
+            batch_size=64
+        )
+        print(f"FID Score: {fid_score:.2f}")
+        return fid_score
+    except Exception as e:
+        print(f"Error computing FID: {e}")
+        return None
 
 
 def main():
@@ -139,7 +250,8 @@ def main():
 
     n_devices = jax.local_device_count()
     if args.batch_size % n_devices != 0:
-        raise ValueError(f"batch_size {args.batch_size} must be divisible by n_devices {n_devices}")
+        raise ValueError(
+            f"batch_size {args.batch_size} must be divisible by n_devices {n_devices}")
 
     rng = jax.random.PRNGKey(getattr(args, "seed", 0))
     rng, rng_model = jax.random.split(rng)
@@ -157,11 +269,23 @@ def main():
     def loss_fn(p, batch, rng_in):
         return vfsddpm_loss(rng_in, p, modules, batch, cfg, train=True)
 
-    p_train_step = train_step_pmap(tx, loss_fn, ema_rate=float(str(args.ema_rate).split(",")[0]))
+    p_train_step = train_step_pmap(
+        tx, loss_fn, ema_rate=float(str(args.ema_rate).split(",")[0]))
 
     # Data loaders (PyTorch) on CPU
     train_loader = create_loader(args, split="train", shuffle=True)
     val_loader = create_loader(args, split="val", shuffle=False)
+
+    # Initialize InceptionV3 for FID computation (if enabled)
+    inception_fn = None
+    if args.compute_fid:
+        print("Loading InceptionV3 for FID computation...")
+        try:
+            inception_fn = fid_jax.get_fid_fn()
+            print("InceptionV3 loaded successfully!")
+        except Exception as e:
+            print(f"Warning: Could not load InceptionV3: {e}")
+            print("FID computation will be skipped.")
 
     # Checkpointing
     checkpointer = ocp.Checkpointer(ocp.PyTreeCheckpointHandler())
@@ -176,7 +300,8 @@ def main():
             "opt_state": host_state.opt_state,
             "step": int(step_int),
             "rng": rng_save,
-            "cfg": dataclasses.asdict(cfg),  # Convert dataclass to dict for Orbax
+            # Convert dataclass to dict for Orbax
+            "cfg": dataclasses.asdict(cfg),
         }
         checkpointer.save(os.path.join(ckpt_dir, f"ckpt_{step_int:06d}"), ckpt)
 
@@ -242,12 +367,14 @@ def main():
             # Save / Eval / Sample
             if args.save_interval and global_step % args.save_interval == 0:
                 save_checkpoint(global_step, rng)
-                eval_loss = eval_loop(p_state, modules, cfg, val_loader, n_devices, args.num_eval_batches)
+                eval_loss = eval_loop(
+                    p_state, modules, cfg, val_loader, n_devices, args.num_eval_batches)
                 logger.logkv("eval_loss", eval_loss)
                 logger.dumpkvs(global_step)
 
                 # Generate samples and log to wandb
-                samples, support = sample_loop(p_state, modules, cfg, val_loader, args.num_sample_batches, rng, args.use_ddim, args.eta)
+                samples, support = sample_loop(
+                    p_state, modules, cfg, val_loader, args.num_sample_batches, rng, args.use_ddim, args.eta)
 
                 if args.use_wandb:
                     log_dict = {"eval_loss": eval_loss, "step": global_step}
@@ -261,21 +388,40 @@ def main():
                         for idx in range(n_log):
                             # Denormalize from [-1, 1] to [0, 1] if needed
                             img = samples[idx].transpose(1, 2, 0)  # CHW -> HWC
-                            img = np.clip((img + 1) / 2, 0, 1)  # [-1,1] -> [0,1]
-                            sample_images.append(wandb.Image(img, caption=f"Sample {idx}"))
+                            # [-1,1] -> [0,1]
+                            img = np.clip((img + 1) / 2, 0, 1)
+                            sample_images.append(wandb.Image(
+                                img, caption=f"Sample {idx}"))
 
                         log_dict["samples"] = sample_images
 
                         # Log support set images
                         support_images = []
-                        support_flat = support.reshape(-1, *support.shape[2:])  # Flatten (B, ns, C, H, W) -> (B*ns, C, H, W)
+                        # Flatten (B, ns, C, H, W) -> (B*ns, C, H, W)
+                        support_flat = support.reshape(-1, *support.shape[2:])
                         for idx in range(min(8, support_flat.shape[0])):
-                            img = support_flat[idx].transpose(1, 2, 0)  # CHW -> HWC
+                            img = support_flat[idx].transpose(
+                                1, 2, 0)  # CHW -> HWC
                             img = np.clip((img + 1) / 2, 0, 1)
-                            support_images.append(wandb.Image(img, caption=f"Support {idx}"))
+                            support_images.append(wandb.Image(
+                                img, caption=f"Support {idx}"))
 
                         log_dict["support_set"] = support_images
 
+                # Compute FID if enabled
+                if args.compute_fid and inception_fn is not None:
+                    print(f"\nComputing FID at step {global_step}...")
+                    fid_score = compute_fid_4096(
+                        p_state, modules, cfg, val_loader,
+                        args.fid_num_samples, rng, args.use_ddim, args.eta, inception_fn
+                    )
+                    if fid_score is not None:
+                        logger.logkv("fid", fid_score)
+                        logger.dumpkvs(global_step)
+                        if args.use_wandb:
+                            log_dict["fid"] = fid_score
+
+                if args.use_wandb:
                     wandb.log(log_dict)
 
             # Check stopping conditions
@@ -313,7 +459,7 @@ def create_argparser():
         lr_anneal_steps=0,
         max_steps=0,  # 0 means infinite, set to positive number to limit training
         batch_size=16,
-        batch_size_eval=32,
+        batch_size_eval=16,
         log_interval=100,
         save_interval=10000,
         num_eval_batches=10,
@@ -321,13 +467,15 @@ def create_argparser():
         ema_rate="0.9999",
         resume_checkpoint="",
         clip_denoised=True,
-        use_ddim=False,
+        use_ddim=True,
         eta=0.0,
         tag=None,
         seed=0,
-        use_wandb=False,
+        use_wandb=True,
         wandb_project="fsdm-jax",
         wandb_run_name=None,
+        compute_fid=False,
+        fid_num_samples=4096,
     )
     defaults.update(model_and_diffusion_defaults_jax())
     parser = argparse.ArgumentParser()
@@ -337,4 +485,3 @@ def create_argparser():
 
 if __name__ == "__main__":
     main()
-
