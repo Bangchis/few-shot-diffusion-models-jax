@@ -216,7 +216,7 @@ def main():
                     if isinstance(v, np.ndarray):
                         v = v.item() if v.size == 1 else v
                     logger.logkv_mean(k, v)
-                logger.dumpkvs()
+                logger.dumpkvs(global_step)
                 if args.use_wandb:
                     wandb.log({**metrics_host, "step": global_step})
 
@@ -225,7 +225,7 @@ def main():
                 save_checkpoint(global_step, rng)
                 eval_loss = eval_loop(p_state, modules, cfg, val_loader, n_devices, args.num_eval_batches)
                 logger.logkv("eval_loss", eval_loss)
-                logger.dumpkvs()
+                logger.dumpkvs(global_step)
                 if args.use_wandb:
                     wandb.log({"eval_loss": eval_loss, "step": global_step})
                 sample_loop(p_state, modules, cfg, val_loader, args.num_sample_batches, rng, args.use_ddim, args.eta)
