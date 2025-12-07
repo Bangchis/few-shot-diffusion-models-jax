@@ -58,7 +58,7 @@ def eval_loop(p_state, modules, cfg, loader, n_devices, num_batches):
     params_eval = host_state.ema_params
     losses = []
     it = iter(loader)
-    for _ in range(num_batches):
+    for _ in tqdm(range(num_batches), desc="Eval", unit="batch"):
         try:
             batch = next(it)
         except StopIteration:
@@ -91,7 +91,7 @@ def sample_loop(p_state, modules, cfg, loader, num_batches, rng, use_ddim, eta):
     all_samples = []
     all_support = []
 
-    for i in range(num_batches):
+    for i in tqdm(range(num_batches), desc="Sampling", unit="batch"):
         try:
             batch = next(it)
         except StopIteration:
@@ -151,6 +151,8 @@ def compute_fid_4096(p_state, modules, cfg, val_loader, n_samples, rng, use_ddim
     n_batches = 0
     total_generated = 0
 
+    pbar = tqdm(total=n_samples, desc="FID Generation", unit="samples")
+
     while total_generated < n_samples:
         try:
             batch = next(it)
@@ -198,11 +200,13 @@ def compute_fid_4096(p_state, modules, cfg, val_loader, n_samples, rng, use_ddim
         total_generated += samples_hwc.shape[0]
         n_batches += 1
 
-        print(
-            f"  Generated {total_generated}/{n_samples} samples ({n_batches} batches)")
+        pbar.update(samples_hwc.shape[0])
+        pbar.set_postfix({"batches": n_batches})
 
         if total_generated >= n_samples:
             break
+
+    pbar.close()
 
     # Concatenate all samples
     generated_images = np.concatenate(all_generated, axis=0)[:n_samples]
