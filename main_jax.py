@@ -169,8 +169,9 @@ def compute_fid_4096(p_state, modules, cfg, val_loader, n_samples, rng, use_ddim
         # Get conditioning via leave-one-out
         sub = {"encoder": ema_params["encoder"],
                "posterior": ema_params.get("posterior")}
+        rng, cond_rng = jax.random.split(rng)
         c_cond, _ = leave_one_out_c(
-            sub, sub, modules, batch_np, cfg, train=False)
+            cond_rng, sub, modules, batch_np, cfg, train=False)
 
         # Sample
         diffusion = modules["diffusion"]
