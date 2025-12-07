@@ -238,9 +238,12 @@ def main():
                     wandb.log({"eval_loss": eval_loss, "step": global_step})
                 sample_loop(p_state, modules, cfg, val_loader, args.num_sample_batches, rng, args.use_ddim, args.eta)
 
-            if args.lr_anneal_steps and global_step >= args.lr_anneal_steps:
+            # Check stopping conditions
+            if (args.lr_anneal_steps and global_step >= args.lr_anneal_steps) or \
+               (args.max_steps and global_step >= args.max_steps):
                 break
-        if args.lr_anneal_steps and global_step >= args.lr_anneal_steps:
+        if (args.lr_anneal_steps and global_step >= args.lr_anneal_steps) or \
+           (args.max_steps and global_step >= args.max_steps):
             break
 
     logger.log("training complete.")
@@ -268,6 +271,7 @@ def create_argparser():
         lr=1e-4,
         weight_decay=0.0,
         lr_anneal_steps=0,
+        max_steps=0,  # 0 means infinite, set to positive number to limit training
         batch_size=16,
         log_interval=100,
         save_interval=10000,
