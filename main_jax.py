@@ -310,7 +310,8 @@ def main():
             # Convert dataclass to dict for Orbax
             "cfg": dataclasses.asdict(cfg),
         }
-        checkpointer.save(os.path.join(ckpt_dir, f"ckpt_{step_int:06d}"), ckpt, force=True)
+        checkpointer.save(os.path.join(
+            ckpt_dir, f"ckpt_{step_int:06d}"), ckpt, force=True)
 
     def load_checkpoint(path):
         nonlocal p_state, rng
