@@ -119,7 +119,7 @@ def sample_loop(p_state, modules, cfg, loader, num_batches, rng, use_ddim, eta):
         np.concatenate(all_support, axis=0) if all_support else None
 
 
-def compute_fid_4096(p_state, modules, cfg, val_loader, n_samples, rng, use_ddim, eta, inception_fn):
+def compute_fid_4096(p_state, modules, cfg, val_loader, n_samples, rng, use_ddim, eta, inception_fn, samples_per_support_set=20):
     """
     Compute FID score by generating n_samples images from different support sets.
 
@@ -133,6 +133,7 @@ def compute_fid_4096(p_state, modules, cfg, val_loader, n_samples, rng, use_ddim
         use_ddim: Whether to use DDIM sampling
         eta: DDIM eta parameter
         inception_fn: InceptionV3 apply function for FID
+        samples_per_support_set: Number of samples to generate from each support set (default=20)
 
     Returns:
         fid_score: FID score (lower is better)
@@ -166,42 +167,47 @@ def compute_fid_4096(p_state, modules, cfg, val_loader, n_samples, rng, use_ddim
         # Unreplicate EMA params from pmap
         ema_params = flax.jax_utils.unreplicate(p_state.ema_params)
 
-        # Get conditioning via leave-one-out
+        # Get conditioning via leave-one-out (COMPUTE ONCE per support set)
         sub = {"encoder": ema_params["encoder"],
                "posterior": ema_params.get("posterior")}
         rng, cond_rng = jax.random.split(rng)
         c_cond, _ = leave_one_out_c(
             cond_rng, sub, modules, batch_np, cfg, train=False)
 
-        # Sample
-        diffusion = modules["diffusion"]
-        model_apply = modules["dit"].apply
-        shape = (bs * ns, C, H, W)
+        # Generate MULTIPLE samples from the SAME support set
+        for _ in range(samples_per_support_set):
+            if total_generated >= n_samples:
+                break
 
-        rng, sample_rng = jax.random.split(rng)
-        # Force DDIM for FID (much faster: 50-100 steps vs 1000)
-        samples = sample_ema(
-            sample_rng, ema_params["dit"], diffusion, model_apply,
-            shape, conditioning=c_cond, use_ddim=True, eta=0.0
-        )
+            # Sample
+            diffusion = modules["diffusion"]
+            model_apply = modules["dit"].apply
+            shape = (bs * ns, C, H, W)
 
-        # Convert samples from (bs*ns, C, H, W) to (bs*ns, H, W, C) for InceptionV3
-        samples_np = np.array(samples)
-        samples_hwc = samples_np.transpose(0, 2, 3, 1)  # NCHW -> NHWC
+            rng, sample_rng = jax.random.split(rng)
+            # Force DDIM for FID (much faster: 50-100 steps vs 1000)
+            samples = sample_ema(
+                sample_rng, ema_params["dit"], diffusion, model_apply,
+                shape, conditioning=c_cond, use_ddim=True, eta=0.0
+            )
 
-        # Also collect real images in NHWC format
-        # (bs, ns, C, H, W) -> (bs*ns, C, H, W)
-        real_np = batch_np.reshape(-1, C, H, W)
-        real_hwc = real_np.transpose(0, 2, 3, 1)  # NCHW -> NHWC
+            # Convert samples from (bs*ns, C, H, W) to (bs*ns, H, W, C) for InceptionV3
+            samples_np = np.array(samples)
+            samples_hwc = samples_np.transpose(0, 2, 3, 1)  # NCHW -> NHWC
 
-        all_generated.append(samples_hwc)
-        all_real.append(real_hwc)
+            # Also collect real images in NHWC format
+            # (bs, ns, C, H, W) -> (bs*ns, C, H, W)
+            real_np = batch_np.reshape(-1, C, H, W)
+            real_hwc = real_np.transpose(0, 2, 3, 1)  # NCHW -> NHWC
 
-        total_generated += samples_hwc.shape[0]
-        n_batches += 1
+            all_generated.append(samples_hwc)
+            all_real.append(real_hwc)
 
-        pbar.update(samples_hwc.shape[0])
-        pbar.set_postfix({"batches": n_batches})
+            total_generated += samples_hwc.shape[0]
+            n_batches += 1
+
+            pbar.update(samples_hwc.shape[0])
+            pbar.set_postfix({"support_sets": n_batches // samples_per_support_set + 1})
 
         if total_generated >= n_samples:
             break
