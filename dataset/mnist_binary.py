@@ -5,11 +5,13 @@ import numpy as np
 import torch
 from torch.utils import data
 
+
 class MNISTSetsDataset(data.Dataset):
     """
     MNIST with sets. 
     We use this dataset only for testing.
     """
+
     def __init__(self,
                  dataset="mnist",
                  data_dir="./",
@@ -25,10 +27,11 @@ class MNISTSetsDataset(data.Dataset):
         self.binarize = binarize
         self.split = split
         self.n_cls = 10
-        self.size=28
-        self.nc=1
-        
-        data_dir = os.path.join(self.data_dir, "mnist_processed/MNIST/processed/")
+        self.size = 28
+        self.nc = 1
+
+        data_dir = os.path.join(
+            self.data_dir, "mnist_processed/MNIST/processed/")
         if self.split == "train":
             train = torch.load(data_dir + "training.pt")
             train_img, train_lbl = train
@@ -46,14 +49,14 @@ class MNISTSetsDataset(data.Dataset):
             self.images = test_img
             self.labels = test_lbl
 
-        dct={i: [] for i in range(self.n_cls)}
+        dct = {i: [] for i in range(self.n_cls)}
         for c in dct:
-            dct[c] = self.images[self.labels == c] 
+            dct[c] = self.images[self.labels == c]
         self.data = dct
 
         self.n = len(self.labels) // self.sample_size
-        
-        self.init_sets() 
+
+        self.init_sets()
 
     def init_sets(self):
         pass
@@ -94,6 +97,7 @@ class MNISTSetsDataset(data.Dataset):
         samples = samples.unsqueeze(1)
         labels = torch.ones(samples.size()) * item
         return samples, labels
+
 
 if __name__ == "__main__":
     # from torchvision.datasets import MNIST

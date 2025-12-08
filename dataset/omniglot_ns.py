@@ -11,56 +11,58 @@ from torch.utils import data
 
 # adapted from durkan
 class OmniglotSetsDatasetNS(data.Dataset):
-    def __init__(self, 
+    def __init__(self,
                  dataset,
-                 data_dir, 
-                 sample_size, 
-                 num_classes_task=1, 
-                 split='train', 
-                 augment=False, 
+                 data_dir,
+                 sample_size,
+                 num_classes_task=1,
+                 split='train',
+                 augment=False,
                  binarize=False):
         """
         Omniglot dataset.
         """
         self.sample_size = sample_size
         self.split = split
-        self.binarize=binarize
+        self.binarize = binarize
         self.augment = augment
 
-        self.dts = {"omniglot_ns": {"size": 28, "img_cls": 20, "nc": 1, "tr": 1000, "vl": 200, "ts": 423}}
+        self.dts = {"omniglot_ns": {"size": 28, "img_cls": 20,
+                                    "nc": 1, "tr": 1000, "vl": 200, "ts": 423}}
 
         path = os.path.join(data_dir, dataset, 'omni_train_val_test.pkl')
-        data=self.get_data(path)
+        data = self.get_data(path)
         self.images, self.labels = data[split]
-        
+
         print(self.split)
         print(self.images.shape, self.labels.shape)
         self.init_sets()
-        
+
     @staticmethod
     def get_data(path):
         with open(path, 'rb') as file:
             data = pickle.load(file)
-        return {"train": data[:2], 
+        return {"train": data[:2],
                 "val": data[2:4],
                 "test": data[4:],
                 }
 
     def init_sets(self):
         sets, set_labels = self.make_sets(self.images, self.labels)
-        
+
         if self.split in ['train', 'val']:
             if self.augment:
                 sets = self.augment_sets(sets)
         if self.binarize:
-            sets = np.random.binomial(1, p=sets, size=sets.shape).astype(np.float32)
-            
+            sets = np.random.binomial(
+                1, p=sets, size=sets.shape).astype(np.float32)
+
         # (batch_size, sample_size, xdim)
         sets = sets.reshape(-1, self.sample_size, 1, 28, 28)
         self.n = len(sets)
         self.data = {
-        'inputs': sets,
-        'targets': set_labels
+            'inputs': sets,
+            'targets': set_labels
         }
 
     def __getitem__(self, item, lbl=None):
@@ -69,7 +71,7 @@ class OmniglotSetsDatasetNS(data.Dataset):
         if self.split in ['train', 'val'] and self.augment:
             targets = np.zeros(samples.shape)
         else:
-            targets = self.data['targets'][item] 
+            targets = self.data['targets'][item]
         if lbl:
             return samples, targets
         return samples
@@ -95,7 +97,7 @@ class OmniglotSetsDatasetNS(data.Dataset):
             angle = np.random.uniform(0, 360)
             for item in range(self.sample_size):
                 augmented[s, item] = rotate(augmented[s, item], angle)
-        
+
         augmented = augmented.reshape(n_sets, self.sample_size, 28*28)
         augmented = np.concatenate([augmented, sets])
         return augmented
@@ -113,15 +115,15 @@ class OmniglotSetsDatasetNS(data.Dataset):
         Create sets of arbitrary size between 1 and 20. 
         The sets are composed of one class.
         """
-        
+
         num_classes = np.max(labels) + 1
         labels = self.one_hot(labels, num_classes)
-        
+
         n = len(images)
         perm = np.random.permutation(n)
         images = images[perm]
         labels = labels[perm]
-        
+
         # init sets
         image_sets = []
         label_sets = []
@@ -151,7 +153,8 @@ class OmniglotSetsDatasetNS(data.Dataset):
                 label_set = label_set[:int(k / self.sample_size)]
                 label_sets.append(label_set)
 
-        x = np.concatenate(image_sets, axis=0).reshape(-1, self.sample_size, 28*28)
+        x = np.concatenate(image_sets, axis=0).reshape(-1,
+                                                       self.sample_size, 28*28)
         y = np.concatenate(label_sets, axis=0)
         if np.max(x) > 1:
             x /= 255
@@ -160,6 +163,7 @@ class OmniglotSetsDatasetNS(data.Dataset):
         x = x[perm]
         y = y[perm]
         return x, y
+
 
 def load_mnist(data_dir):
 
@@ -213,19 +217,21 @@ def load_mnist_test_batch(args):
     ixs = [np.random.choice(np.where(labels == i)[0], size=args.sample_size_test, replace=False)
            for i in range(10)]
     batch = np.array([images[ix] for ix in ixs])
-    #label = np.array([labels[ix] for ix in ixs])
+    # label = np.array([labels[ix] for ix in ixs])
     return torch.from_numpy(batch).clone().repeat((args.batch_size // 10) + 1, 1, 1)[:args.batch_size]
-    
+
 
 if __name__ == "__main__":
 
-    omniglot = OmniglotSetsDatasetNS("/home/gigi/ns_data/omniglot_ns/", sample_size=5)
+    omniglot = OmniglotSetsDatasetNS(
+        "/home/gigi/ns_data/omniglot_ns/", sample_size=5)
 
     print(omniglot.data["inputs"].shape)
     print(omniglot.data["targets"].shape)
     print(len(omniglot))
 
-    omniglot = OmniglotSetsDatasetNS("/home/gigi/ns_data/omniglot_ns/", sample_size=20)
+    omniglot = OmniglotSetsDatasetNS(
+        "/home/gigi/ns_data/omniglot_ns/", sample_size=20)
 
     print(omniglot.data["inputs"].shape)
     print(omniglot.data["targets"].shape)

@@ -6,6 +6,7 @@ import torch
 from PIL import Image
 from torch.utils import data
 
+
 class CelebaSetsDataset(data.Dataset):
     """
     Base class for all the datasets.
@@ -15,7 +16,8 @@ class CelebaSetsDataset(data.Dataset):
         num_classes_task: for generative models we use 1 concept per set.
         split: train/val/test
         augment: augment the sets with flipping and/or rotations.
-    """ 
+    """
+
     def __init__(self,
                  dataset="celeba",
                  data_dir="/scratch/gigi/data/celeba/processed_celeba/",
@@ -28,19 +30,21 @@ class CelebaSetsDataset(data.Dataset):
         with open("/home/gigi/ns_data/celeba/map_celeba.pkl", "rb") as f:
             self.map_classes = pickle.load(f)
         self.data_dir = data_dir
-        self.data_dir = "/scratch/gigi/data/celeba/processed_celeba/" #"/scratch/gigi/data/celeba/"
+        # "/scratch/gigi/data/celeba/"
+        self.data_dir = "/scratch/gigi/data/celeba/processed_celeba/"
         self.sample_size = sample_size
         self.split = split
         self.mix = True
-        self.size=64
-        self.nc=3
+        self.size = 64
+        self.nc = 3
 
-        self.dts = {"celeba": {"size": 64, "img_cls": [20, 30], "nc": 3, "tr": 4444, "vl": 635, "ts": 1270}}
-        
+        self.dts = {"celeba": {"size": 64, "img_cls": [
+            20, 30], "nc": 3, "tr": 4444, "vl": 635, "ts": 1270}}
+
         classes = sorted(self.map_classes.keys())
-        
-        s0 = int(0.7* len(classes))
-        s1 = int(0.8* len(classes))
+
+        s0 = int(0.7 * len(classes))
+        s1 = int(0.8 * len(classes))
         if self.split == "train":
             self.classes = np.array(classes[:s0])
         elif self.split == "val":
@@ -50,10 +54,10 @@ class CelebaSetsDataset(data.Dataset):
 
         self.n = (len(self.classes) * 20) // self.sample_size
         self.init_sets()
-            
+
     def init_sets(self):
         perm = np.random.permutation(len(self.classes))
-        self.classes = self.classes[perm] 
+        self.classes = self.classes[perm]
 
     def __getitem__(self, item, lbl=None):
         samples = self.make_set(item)
@@ -67,7 +71,7 @@ class CelebaSetsDataset(data.Dataset):
         e = self.classes[item]
         a = self.map_classes[e]
         samples = np.random.choice(a, size=self.sample_size, replace=False)
-        
+
         lst = []
         for sample in samples:
             with Image.open(self.data_dir + sample, "r") as img:
@@ -81,6 +85,7 @@ class CelebaSetsDataset(data.Dataset):
         lst = np.concatenate(lst, 0)
         return lst
 
+
 if __name__ == "__main__":
 
     dataset = CelebaSetsDataset(dataset="celeba")
@@ -93,6 +98,6 @@ if __name__ == "__main__":
     fig, axes = plt.subplots(nrows=1, ncols=5, figsize=(6, 3))
 
     for i in range(5):
-        tmp=(batch[i] + 1) / 2
+        tmp = (batch[i] + 1) / 2
         axes[i].imshow(tmp.transpose(1, 2, 0))
     fig.savefig("./_img/tmp.png")
