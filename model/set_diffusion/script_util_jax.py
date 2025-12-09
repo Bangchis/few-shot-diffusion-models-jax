@@ -97,7 +97,7 @@ def create_model_and_diffusion(
 ):
     """
     Create DiT model and diffusion process (JAX version).
-    
+
     Args:
         image_size: Image size (must be divisible by patch_size)
         in_channels: Input channels
@@ -121,7 +121,7 @@ def create_model_and_diffusion(
         class_dropout_prob: Class dropout probability for classifier-free guidance
         use_fp16: Whether to use float16 (not fully supported in JAX, kept for compatibility)
         ... (các tham số không dùng, giữ để tương thích với UNet interface)
-    
+
     Returns:
         model: DiT Flax module
         diffusion: GaussianDiffusion instance (JAX)
@@ -141,7 +141,7 @@ def create_model_and_diffusion(
         class_dropout_prob=class_dropout_prob,
         dropout=dropout,
     )
-    
+
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
         learn_sigma=learn_sigma,
@@ -152,7 +152,7 @@ def create_model_and_diffusion(
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
     )
-    
+
     return model, diffusion
 
 
@@ -173,7 +173,7 @@ def create_dit_model(
 ):
     """
     Create DiT (Diffusion Transformer) model.
-    
+
     Args:
         image_size: Image size (must be divisible by patch_size)
         in_channels: Input channels
@@ -188,7 +188,7 @@ def create_dit_model(
         class_cond: Whether to use class conditioning
         class_dropout_prob: Class dropout probability for classifier-free guidance
         dropout: Dropout rate
-    
+
     Returns:
         DiT Flax module
     """
@@ -202,9 +202,9 @@ def create_dit_model(
             raise ValueError(
                 f"image_size ({image_size}) must be divisible by patch_size ({patch_size})"
             )
-    
+
     num_classes = NUM_CLASSES if class_cond else 0
-    
+
     return DiT(
         patch_size=patch_size,
         hidden_size=hidden_size,
@@ -237,7 +237,7 @@ def create_gaussian_diffusion(
 ):
     """
     Create Gaussian diffusion process (JAX version).
-    
+
     Args:
         steps: Number of diffusion steps
         learn_sigma: Whether to learn sigma
@@ -248,24 +248,24 @@ def create_gaussian_diffusion(
         rescale_timesteps: Whether to rescale timesteps
         rescale_learned_sigmas: Whether to rescale learned sigmas
         timestep_respacing: Timestep respacing (empty string means no respacing)
-    
+
     Returns:
         GaussianDiffusion instance (JAX)
     """
     betas = gd_jax.get_named_beta_schedule(noise_schedule, steps)
-    
+
     if use_kl:
         loss_type = gd_jax.LossType.RESCALED_KL
     elif rescale_learned_sigmas:
         loss_type = gd_jax.LossType.RESCALED_MSE
     else:
         loss_type = gd_jax.LossType.MSE
-    
+
     # Handle timestep respacing
     # Note: JAX version doesn't have SpacedDiffusion wrapper yet
     # For now, we'll use all timesteps
     # TODO: Implement timestep respacing for JAX version if needed
-    
+
     return gd_jax.GaussianDiffusion(
         betas=betas,
         model_mean_type=(
