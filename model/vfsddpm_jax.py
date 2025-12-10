@@ -256,7 +256,7 @@ def leave_one_out_c(
     train: bool,
 ) -> Tuple[Array, Optional[Array]]:
     """
-    Build conditioning c for each element via leave-one-out over the set.
+    Build conditioning c for each element via leave-one-out over the set (VECTORIZED).
     Returns (c, klc_optional).
     Shapes:
         film -> c: (bs * ns, hdim)
@@ -267,19 +267,40 @@ def leave_one_out_c(
     posterior = modules.get("posterior")
     params_post = params.get("posterior")
 
-    kl_list = []
-    c_list = []
-    rngs = jax.random.split(rng, ns)
-    for i in range(ns):
-        idx = [k for k in range(ns) if k != i]
-        x_subset = batch_set[:, idx]  # (b, ns-1, C, H, W)
-        hc = encode_set(params["encoder"], enc, x_subset, cfg, train=train)
-        c_vec, klc = sample_context(rngs[i], hc, cfg, posterior, params_post)
-        c_list.append(c_vec[:, None, ...])  # keep set slot
-        if klc is not None:
-            kl_list.append(klc)
+    # Create leave-one-out mask: (ns, ns) boolean array
+    # mask[i, j] = True if j != i (i.e., keep element j when processing element i)
+    indices = jnp.arange(ns)
+    mask = indices[:, None] != indices[None, :]  # (ns, ns)
 
-    c_set = jnp.concatenate(c_list, axis=1)  # (b, ns, hdim)
+    # Create all leave-one-out subsets at once
+    # For each i, gather all elements except i
+    # Result: (ns, b, ns-1, C, H, W)
+    def create_loo_subset(i):
+        subset_mask = mask[i]  # (ns,) boolean
+        # Use boolean indexing to select ns-1 elements
+        return batch_set[:, subset_mask]  # (b, ns-1, C, H, W)
+
+    # Vectorize over ns dimension
+    loo_subsets = jax.vmap(create_loo_subset)(indices)  # (ns, b, ns-1, C, H, W)
+
+    # Reshape to mega-batch: (ns*b, ns-1, C, H, W)
+    loo_flat = loo_subsets.reshape(ns * b, ns - 1, *batch_set.shape[2:])
+
+    # SINGLE encoder call for all leave-one-out subsets (100x faster!)
+    hc_flat = encode_set(params["encoder"], enc, loo_flat, cfg, train=train)  # (ns*b, hdim)
+
+    # Reshape back: (ns*b, hdim) -> (ns, b, hdim)
+    hc_batched = hc_flat.reshape(ns, b, -1)
+
+    # Vectorize sample_context over ns dimension
+    rngs = jax.random.split(rng, ns)
+    def sample_single(hc_i, rng_i):
+        return sample_context(rng_i, hc_i, cfg, posterior, params_post)
+
+    c_vecs, klcs = jax.vmap(sample_single)(hc_batched, rngs)  # c_vecs: (ns, b, hdim), klcs: (ns,) or (ns, b)
+
+    # Transpose to (b, ns, hdim)
+    c_set = jnp.transpose(c_vecs, (1, 0, 2))
 
     if cfg.mode_conditioning == "lag":
         # provide one token per element (can be extended)
@@ -288,8 +309,9 @@ def leave_one_out_c(
         c = c_set.reshape(b * ns, c_set.shape[-1])
 
     klc_total = None
-    if kl_list:
-        klc_total = jnp.stack(kl_list, axis=0).mean()
+    if klcs is not None:
+        # klcs can be (ns,) scalar or (ns, ...) array depending on mode
+        klc_total = jnp.mean(klcs)
 
     return c, klc_total
 
