@@ -327,6 +327,7 @@ class DiT(nn.Module):
             )
             if c is not None:
                 context_proj = context_proj_layer(c)
+                context_proj = nn.LayerNorm(use_bias=True, use_scale=True)(context_proj)  # Normalize with learnable shift & scale
                 conditioning = t_emb + context_proj
             else:
                 # MUST call layer with dummy input to initialize parameters
