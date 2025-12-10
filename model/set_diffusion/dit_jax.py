@@ -141,7 +141,7 @@ class MlpBlock(nn.Module):
     )
 
     @nn.compact
-    def __call__(self, inputs):
+    def __call__(self, inputs, *, train: bool = False):
         actual_out_dim = inputs.shape[-1] if self.out_dim is None else self.out_dim
         x = nn.Dense(
             features=self.mlp_dim,
@@ -150,12 +150,16 @@ class MlpBlock(nn.Module):
             bias_init=self.bias_init,
         )(inputs)
         x = nn.gelu(x)
+        if self.dropout_rate is not None and self.dropout_rate > 0.0:
+            x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=not train)
         output = nn.Dense(
             features=actual_out_dim,
             dtype=self.dtype,
             kernel_init=self.kernel_init,
             bias_init=self.bias_init,
         )(x)
+        if self.dropout_rate is not None and self.dropout_rate > 0.0:
+            output = nn.Dropout(rate=self.dropout_rate)(output, deterministic=not train)
         return output
 
 
@@ -199,9 +203,10 @@ class DiTBlock(nn.Module):
     mlp_ratio: float = 4.0
     context_channels: int = 0
     mode_conditioning: str = "film"  # "film" or "lag"
+    dropout: float = 0.0
 
     @nn.compact
-    def __call__(self, x, c, context=None):
+    def __call__(self, x, c, context=None, train=False):
         # adaLN modulation params
         c_mod = nn.silu(c)
         c_mod = nn.Dense(
@@ -220,8 +225,10 @@ class DiTBlock(nn.Module):
         x_norm = nn.LayerNorm(use_bias=False, use_scale=False)(x)
         x_modulated = modulate(x_norm, shift_msa, scale_msa)
         attn_x = nn.MultiHeadDotProductAttention(
-            kernel_init=nn.initializers.xavier_uniform(), num_heads=self.num_heads
-        )(x_modulated, x_modulated)
+            kernel_init=nn.initializers.xavier_uniform(),
+            num_heads=self.num_heads,
+            dropout_rate=self.dropout if train else 0.0
+        )(x_modulated, x_modulated, deterministic=not train)
         x = x + (gate_msa[:, None] * attn_x)
 
         # Cross-attention for lag
@@ -231,15 +238,19 @@ class DiTBlock(nn.Module):
                 self.hidden_size, kernel_init=nn.initializers.xavier_uniform()
             )(context)
             cross_attn_x = nn.MultiHeadDotProductAttention(
-                kernel_init=nn.initializers.xavier_uniform(), num_heads=self.num_heads
-            )(x_norm_cross, context_proj, context_proj)
+                kernel_init=nn.initializers.xavier_uniform(),
+                num_heads=self.num_heads,
+                dropout_rate=self.dropout if train else 0.0
+            )(x_norm_cross, context_proj, context_proj, deterministic=not train)
             x = x + cross_attn_x
 
         # MLP
         x_norm2 = nn.LayerNorm(use_bias=False, use_scale=False)(x)
         x_modulated2 = modulate(x_norm2, shift_mlp, scale_mlp)
-        mlp_x = MlpBlock(mlp_dim=int(self.hidden_size *
-                         self.mlp_ratio))(x_modulated2)
+        mlp_x = MlpBlock(
+            mlp_dim=int(self.hidden_size * self.mlp_ratio),
+            dropout_rate=self.dropout
+        )(x_modulated2, train=train)
         x = x + (gate_mlp[:, None] * mlp_x)
         return x
 
@@ -284,6 +295,7 @@ class DiT(nn.Module):
     learn_sigma: bool = False
     context_channels: int = 0
     mode_conditioning: str = "film"  # "film" or "lag"
+    dropout: float = 0.0
 
     @nn.compact
     def __call__(self, x, t, c=None, y=None, train=False, force_drop_ids=None):
@@ -325,17 +337,17 @@ class DiT(nn.Module):
             context_proj_layer = nn.Dense(
                 self.hidden_size, kernel_init=nn.initializers.xavier_uniform()
             )
+
             if c is not None:
                 context_proj = context_proj_layer(c)
-                context_proj = nn.LayerNorm(use_bias=True, use_scale=True)(context_proj)  # Normalize with learnable shift & scale
-                conditioning = t_emb + context_proj
+                conditioning = jnp.concatenate([t_emb, context_proj], axis=-1)  # Concatenate instead of add
             else:
                 # MUST call layer with dummy input to initialize parameters
                 # AND add the zero projection to maintain consistent computation graph
                 dummy_c = jnp.zeros(
                     (x.shape[0], self.context_channels), dtype=x.dtype)
                 zero_context_proj = context_proj_layer(dummy_c)
-                conditioning = t_emb + zero_context_proj  # FIX: consistent with c!=None case
+                conditioning = jnp.concatenate([t_emb, zero_context_proj], axis=-1)  # Concatenate instead of add
         else:
             conditioning = t_emb
 
@@ -347,7 +359,8 @@ class DiT(nn.Module):
                     self.mlp_ratio,
                     self.context_channels,
                     self.mode_conditioning,
-                )(x, conditioning, context=c)
+                    self.dropout,
+                )(x, conditioning, context=c, train=train)
             else:
                 x = DiTBlock(
                     self.hidden_size,
@@ -355,7 +368,8 @@ class DiT(nn.Module):
                     self.mlp_ratio,
                     self.context_channels,
                     self.mode_conditioning,
-                )(x, conditioning)
+                    self.dropout,
+                )(x, conditioning, train=train)
 
         x = FinalLayer(
             self.patch_size,

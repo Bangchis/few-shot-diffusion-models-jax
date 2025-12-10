@@ -47,7 +47,7 @@ def dit_model_defaults():
         patch_size=2,  # DiT patch size
         context_channels=256,  # Few-shot conditioning dimension
         mode_conditioning="film",  # "film" or "lag"
-        dropout=0.0,
+        dropout=0.2,  # Match UNet dropout rate
         class_cond=False,
         class_dropout_prob=0.1,  # DiT class dropout for classifier-free guidance
         use_fp16=False,
@@ -169,7 +169,7 @@ def create_dit_model(
     learn_sigma=False,
     class_cond=False,
     class_dropout_prob=0.1,
-    dropout=0.0,
+    dropout=0.2,  # Match UNet dropout rate
 ):
     """
     Create DiT (Diffusion Transformer) model.
